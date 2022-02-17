@@ -5,6 +5,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "10"
 
+from geomloss import SamplesLoss
 import numpy as np
 import torch
 import torch.nn as nn
@@ -166,6 +167,9 @@ def app(cfg : DictConfig) -> None:
                      source_length=source_length, target_length=target_length, 
                      source_dim=1, target_dim=1, regularization=config['regularization']).cuda()
 
+    sinkhorn = SamplesLoss(loss="sinkhorn", p=2, blur=config["alpha"], debias=False, potentials=True)
+    u_exact, v_exact = sinkhorn(torch.exp(mu_log).squeeze().cuda(), u_support.cuda(), torch.exp(nu_log).squeeze().cuda(), v_support.cuda())
+
     optimizer = build_optimizer(ot_plan.parameters(), config)
 
     for step in range(config.steps):
@@ -196,18 +200,22 @@ def app(cfg : DictConfig) -> None:
                 u_val = ot_plan.u(u_support.cuda()).detach().cpu()
                 u_x = u_support
             u_fig = plt.figure()
-            plt.plot(u_x.numpy(), u_val.numpy())
+            plt.plot(u_x.numpy(), u_val.numpy(), label="NN Approximation")
+            plt.plot(u_support.squeeze().cpu().numpy(), u_exact.squeeze().cpu().numpy(), label="Sinkhorn solution")
+            plt.legend()
             if config['target']['setting'] == 'discrete':
                 v_x, v_val = y.detach(), ot_plan.v.detach().cpu()
             else:
                 v_val = ot_plan.v(v_support.cuda()).detach().cpu()
-                v_x = u_support
+                v_x = v_support
             v_fig = plt.figure()
-            plt.plot(v_x.numpy(), v_val.numpy())
+            plt.plot(v_x.numpy(), v_val.numpy(), label="NN Approximation")
+            plt.plot(v_support.squeeze().cpu().numpy(), v_exact.squeeze().cpu().numpy(), label="Sinkhorn solution")
+            plt.legend()
 
             cost = l2_distance(u_support, v_support)
-            transport_plan = torch.exp(u_val[:,None].cuda() / config["alpha"] + mu_log[:,None].cuda() 
-                                     + v_val[None,:].cuda() / config["alpha"] + nu_log[None,:].cuda() - cost.cuda()/config["alpha"])
+            transport_plan = torch.exp(u_val[:,None].cuda() / config["alpha"] + mu_log[:,None].squeeze().cuda() 
+                                     + v_val[None,:].cuda() / config["alpha"] + nu_log[None,:].squeeze().cuda() - cost.cuda()/config["alpha"])
 
             plan = plt.figure()
             plt.imshow(transport_plan.cpu().detach().numpy())
