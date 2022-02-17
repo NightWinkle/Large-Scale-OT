@@ -1,19 +1,22 @@
 from typing import Union
 import os
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "10"
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import MultivariateNormal, Normal
 from torch.nn import Parameter
 from torch.optim import Adam, SGD
+import matplotlib.pyplot as plt
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "10"
 
 def l2_distance(x: torch.Tensor, y: torch.Tensor) \
         -> torch.Tensor:
@@ -76,11 +79,11 @@ class OTPlan(nn.Module):
         K = torch.sqrt(l2_distance(x, y))
         u, v = self._get_uv(x, y, xidx, yidx)
 
-        if regularization == 'entropy':
-            reg = - alpha * torch.exp((u[:, None] + v[None, :] - K) / alpha)
+        if self.regularization == 'entropy':
+            reg = - self.alpha * torch.exp((u[:, None] + v[None, :] - K) / self.alpha)
         else:
             reg = - torch.clamp((u[:, None] + v[None, :] - K),
-                                min=0) ** 2 / 4 / alpha
+                                min=0) ** 2 / 4 / self.alpha
         return - torch.mean(u[:, None] + v[None, :] + reg)
 
     def forward(self, x, y, xidx=None, yidx=None):
@@ -126,115 +129,81 @@ class ContinuousPotential(nn.Module):
     def forward(self, x):
         return self.u(x)[:, 0]
 
-
-n_plan_iter = 10000
-n_map_iter = 10000
-alpha = .0025
-batch_size = 100
-regularization = 'l2'
-n_target_samples = 1000
-lr = 1e-3
-
-
-def run(setting='discrete_discrete'):
-    if setting == 'discrete_discrete':
-        x = Normal(torch.eye(1) * mu_source, torch.eye(1) * sigma_source)
-
-        y = Normal(torch.eye(1) * mu_target, torch.eye(1) * sigma_target)
-
-        x = torch.from_numpy(x).float()
-        y = torch.from_numpy(y).float()
-        wy = torch.from_numpy(wy).float()
-        wx = torch.from_numpy(wx).float()
-
-        x = MultivariateNormal(torch.zeros(2), torch.eye(2) / 4)
-        x = x.sample((n_target_samples, ))
-        wx = np.full(len(x), 1 / len(x))
-        wx = torch.from_numpy(wx).float()
-
-        ot_plan = OTPlan(source_type='discrete', target_type='discrete',
-                         target_length=len(y), source_length=len(x))
-    elif setting == 'continuous_discrete':
-        x = MultivariateNormal(torch.zeros(2), torch.eye(2) / 4)
-        y, wy = make_circle(radius=4, n_samples=n_target_samples)
-
-        y = torch.from_numpy(y).float()
-        wy = torch.from_numpy(wy).float()
-
-        ot_plan = OTPlan(source_type='continuous', target_type='discrete',
-                         target_length=len(y), source_dim=2)
+def build_optimizer(params, config):
+    if config['optimizer'] == "adam":
+        opt = Adam(params, config['lr'], amsgrad=True)
+    elif config['optimizer'] == "sgd":
+        opt = SGD(params, lr=config['lr'])
     else:
-        raise ValueError
+        opt = Adam(params, config['lr'], amsgrad=True)
+    return opt
 
-    mapping = Mapping(ot_plan, dim=2)
-    optimizer = Adam(ot_plan.parameters(), amsgrad=True, lr=lr)
-    # optimizer = SGD(ot_plan.parameters(), lr=lr)
+@hydra.main(config_path="simple1dconf", config_name="config")
+def app(cfg : DictConfig) -> None:
+    wandb.init(project="largescaleot_seguy", entity="nightwinkle", config=OmegaConf.to_container(cfg))
 
+    config = wandb.config
 
-    plan_objectives = []
-    map_objectives = []
+    x = Normal(torch.eye(1) * config['source']['mean'], torch.eye(1) * config['source']['std'])
+    source_length = None
+    if config['source']['setting'] == 'discrete':
+        x = x.sample((config['source']['n_samples'], 1))
+        source_length = config['source']['n_samples']
+        wx = np.full((config['source']['n_samples'],), 1/config['source']['n_samples'])
 
-    print('Learning OT plan')
+    y = Normal(torch.eye(1) * config['target']['mean'], torch.eye(1) * config['target']['std'])
+    target_length = config['target']['n_samples']
+    if config['target']['setting'] == 'discrete':
+        x = y.sample((config['target']['n_samples'], 1))
+        target_length = config['target']['n_samples']
+        wy = np.full((config['target']['n_samples'],), 1/config['target']['n_samples'])
 
-    for i in range(n_plan_iter):
+    ot_plan = OTPlan(source_type=config['source']['setting'], target_type=config['target']['setting'],
+                     source_length=source_length, target_length=target_length, 
+                     source_dim=1, target_dim=1, regularization=config['regularization'])
+
+    optimizer = build_optimizer(ot_plan.parameters(), config)
+
+    for step in range(config.steps):
         optimizer.zero_grad()
 
-        if setting == 'discrete_discrete':
-            this_yidx = torch.multinomial(wy, batch_size)
-            this_y = y[this_yidx]
-            this_xidx = torch.multinomial(wx, batch_size)
+        if config['source']['setting'] == 'discrete':
+            this_xidx = torch.multinomial(wx, config.batch_size)
             this_x = x[this_xidx]
         else:
-            this_x = x.sample((batch_size,))
-            this_yidx = torch.multinomial(wy, batch_size)
-            this_y = y[this_yidx]
             this_xidx = None
+            this_x = x.sample((config.batch_size, 1))
+        if config['target']['setting'] == 'discrete':
+            this_yidx = torch.multinomial(wy, config.batch_size)
+            this_y = y[this_xidx]
+        else:
+            this_yidx = None
+            this_y = y.sample((config.batch_size, 1))
+
         loss = ot_plan.loss(this_x, this_y, yidx=this_yidx, xidx=this_xidx)
         loss.backward()
         optimizer.step()
-        plan_objectives.append(-loss.item())
-        if i % 100 == 0:
-            print(f'Iter {i}, loss {-loss.item():.3f}')
 
-    optimizer = Adam(mapping.parameters(), amsgrad=True, lr=lr)
-    # optimizer = SGD(mapping.parameters(), lr=1e-5)
+        wandb.log({"objective": -loss.item()})
+        if step % config['log_steps'] == 0:
+            if config['source']['setting'] == 'discrete':
+                u_fig = plt.figure()
+                u_fig.plot(x, ot_plan.u)
+            else:
+                u_support = torch.linspace(config['source']['support'][0], config['source']['support'][1], config['n_support'])
+                u_val = ot_plan.u(u_support)
+                u_fig = plt.figure()
+                u_fig.plot(u_support, u_val)
 
-
-    print('Learning barycentric mapping')
-    for i in range(n_map_iter):
-        optimizer.zero_grad()
-
-        if setting == 'discrete_discrete':
-            this_yidx = torch.multinomial(wy, batch_size)
-            this_y = y[this_yidx]
-            this_xidx = torch.multinomial(wx, batch_size)
-            this_x = x[this_xidx]
-        else:
-            this_x = x.sample((batch_size,))
-            this_yidx = torch.multinomial(wy, batch_size)
-            this_y = y[this_yidx]
-            this_xidx = None
-
-        loss = mapping.loss(this_x, this_y, yidx=this_yidx, xidx=this_xidx)
-        loss.backward()
-        optimizer.step()
-        map_objectives.append(loss.item())
-        if i % 100 == 0:
-            print(f'Iter {i}, loss {loss.item():.3f}')
-
-    if setting == 'continuous_discrete':
-        x = x.sample((len(y),))
-    with torch.no_grad():
-        mapped = mapping(x)
-    x = x.numpy()
-    y = y.numpy()
-    mapped = mapped.numpy()
-
-    return x, y, mapped, plan_objectives, map_objectives
-
-@hydra.main(config_path="simple1dconf", config_name="config")
-def main(cfg : DictConfig) -> None:
-    wandb.init(project="largescaleot_seguy", entity="nightwinkle", config=OmegaConf.to_container(cfg))
+            if config['target']['setting'] == 'discrete':
+                v_fig = plt.figure()
+                v_fig.plot(y, ot_plan.v)
+            else:
+                v_support = torch.linspace(config['target']['support'][0], config['target']['support'][1], config['n_support'])
+                v_val = ot_plan.v(v_support)
+                v_fig = plt.figure()
+                v_fig.plot(u_support, v_val)
+            wandb.log({"u_potential": u_fig, "v_potential": v_fig})
 
 if __name__=="__main__":
-    main()
+    app()
