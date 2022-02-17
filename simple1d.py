@@ -145,6 +145,8 @@ def app(cfg : DictConfig) -> None:
     config = wandb.config
 
     x = Normal(torch.eye(1) * config['source']['mean'], torch.eye(1) * config['source']['std'])
+    u_support = torch.linspace(config['source']['support'][0], config['source']['support'][1], config['n_support']).unsqueeze(-1)
+    mu_log = x.log_prob(u_support)
     source_length = None
     if config['source']['setting'] == 'discrete':
         x = x.sample((config['source']['n_samples'], 1))
@@ -152,6 +154,8 @@ def app(cfg : DictConfig) -> None:
         wx = np.full((config['source']['n_samples'],), 1/config['source']['n_samples'])
 
     y = Normal(torch.eye(1) * config['target']['mean'], torch.eye(1) * config['target']['std'])
+    v_support = torch.linspace(config['target']['support'][0], config['target']['support'][1], config['n_support']).unsqueeze(-1)
+    nu_log = y.log_prob(v_support)
     target_length = config['target']['n_samples']
     if config['target']['setting'] == 'discrete':
         x = y.sample((config['target']['n_samples'], 1))
@@ -187,23 +191,27 @@ def app(cfg : DictConfig) -> None:
         wandb.log({"objective": -loss.item()})
         if step % config['log_steps'] == 0:
             if config['source']['setting'] == 'discrete':
-                u_fig = plt.figure()
-                plt.plot(x.detach().numpy(), ot_plan.u.detach().cpu().numpy())
+                u_x, u_val = x.detach(), ot_plan.u.detach().cpu()
             else:
-                u_support = torch.linspace(config['source']['support'][0], config['source']['support'][1], config['n_support']).unsqueeze(-1)
-                u_val = ot_plan.u(u_support.cuda()).detach().cpu().numpy()
-                u_fig = plt.figure()
-                plt.plot(u_support, u_val)
-
+                u_val = ot_plan.u(u_support.cuda()).detach().cpu()
+                u_x = u_support
+            u_fig = plt.figure()
+            plt.plot(u_x.numpy(), u_val.numpy())
             if config['target']['setting'] == 'discrete':
-                v_fig = plt.figure()
-                plt.plot(y.detach().numpy(), ot_plan.v.detach().cpu().numpy())
+                v_x, v_val = y.detach(), ot_plan.v.detach().cpu()
             else:
-                v_support = torch.linspace(config['target']['support'][0], config['target']['support'][1], config['n_support']).unsqueeze(-1)
-                v_val = ot_plan.v(v_support.cuda()).detach().cpu().numpy()
-                v_fig = plt.figure()
-                plt.plot(u_support, v_val)
-            wandb.log({"u_potential": u_fig, "v_potential": v_fig})
+                v_val = ot_plan.v(v_support.cuda()).detach().cpu()
+                v_x = u_support
+            v_fig = plt.figure()
+            plt.plot(v_x.numpy(), v_val.numpy())
+
+            cost = l2_distance(u_support, v_support)
+            transport_plan = torch.exp(u_val[:,None].cuda() / config["alpha"] + mu_log[:,None].cuda() 
+                                     + v_val[None,:].cuda() / config["alpha"] + nu_log[None,:].cuda() - cost.cuda()/config["alpha"])
+
+            plan = plt.figure()
+            plt.imshow(transport_plan.cpu().detach().numpy())
+            wandb.log({"u_potential": u_fig, "v_potential": v_fig, "transport_plan": plan})
 
 if __name__=="__main__":
     app()
