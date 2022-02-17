@@ -160,7 +160,7 @@ def app(cfg : DictConfig) -> None:
 
     ot_plan = OTPlan(source_type=config['source']['setting'], target_type=config['target']['setting'],
                      source_length=source_length, target_length=target_length, 
-                     source_dim=1, target_dim=1, regularization=config['regularization'])
+                     source_dim=1, target_dim=1, regularization=config['regularization']).cuda()
 
     optimizer = build_optimizer(ot_plan.parameters(), config)
 
@@ -168,17 +168,17 @@ def app(cfg : DictConfig) -> None:
         optimizer.zero_grad()
 
         if config['source']['setting'] == 'discrete':
-            this_xidx = torch.multinomial(wx, config.batch_size)
-            this_x = x[this_xidx]
+            this_xidx = torch.multinomial(wx, config.batch_size).cuda()
+            this_x = x[this_xidx].cuda()
         else:
             this_xidx = None
-            this_x = x.sample((config.batch_size, 1))
+            this_x = x.sample((config.batch_size, 1)).cuda()
         if config['target']['setting'] == 'discrete':
-            this_yidx = torch.multinomial(wy, config.batch_size)
-            this_y = y[this_xidx]
+            this_yidx = torch.multinomial(wy, config.batch_size).cuda()
+            this_y = y[this_xidx].cuda()
         else:
             this_yidx = None
-            this_y = y.sample((config.batch_size, 1))
+            this_y = y.sample((config.batch_size, 1)).cuda()
 
         loss = ot_plan.loss(this_x, this_y, yidx=this_yidx, xidx=this_xidx)
         loss.backward()
@@ -188,21 +188,21 @@ def app(cfg : DictConfig) -> None:
         if step % config['log_steps'] == 0:
             if config['source']['setting'] == 'discrete':
                 u_fig = plt.figure()
-                u_fig.plot(x, ot_plan.u)
+                plt.plot(x.detach().numpy(), ot_plan.u.detach().cpu().numpy())
             else:
-                u_support = torch.linspace(config['source']['support'][0], config['source']['support'][1], config['n_support'])
-                u_val = ot_plan.u(u_support)
+                u_support = torch.linspace(config['source']['support'][0], config['source']['support'][1], config['n_support']).unsqueeze(-1)
+                u_val = ot_plan.u(u_support.cuda()).detach().cpu().numpy()
                 u_fig = plt.figure()
-                u_fig.plot(u_support, u_val)
+                plt.plot(u_support, u_val)
 
             if config['target']['setting'] == 'discrete':
                 v_fig = plt.figure()
-                v_fig.plot(y, ot_plan.v)
+                plt.plot(y.detach().numpy(), ot_plan.v.detach().cpu().numpy())
             else:
-                v_support = torch.linspace(config['target']['support'][0], config['target']['support'][1], config['n_support'])
-                v_val = ot_plan.v(v_support)
+                v_support = torch.linspace(config['target']['support'][0], config['target']['support'][1], config['n_support']).unsqueeze(-1)
+                v_val = ot_plan.v(v_support.cuda()).detach().cpu().numpy()
                 v_fig = plt.figure()
-                v_fig.plot(u_support, v_val)
+                plt.plot(u_support, v_val)
             wandb.log({"u_potential": u_fig, "v_potential": v_fig})
 
 if __name__=="__main__":
