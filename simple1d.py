@@ -141,7 +141,7 @@ def build_optimizer(params, config):
 
 @hydra.main(config_path="simple1dconf", config_name="config")
 def app(cfg : DictConfig) -> None:
-    wandb.init(project="largescaleot_seguy", entity="nightwinkle", config=OmegaConf.to_container(cfg))
+    run = wandb.init(project="largescaleot_seguy", entity="nightwinkle", config=OmegaConf.to_container(cfg), reinit=True)
 
     config = wandb.config
 
@@ -220,6 +220,7 @@ def app(cfg : DictConfig) -> None:
             plan = plt.figure()
             plt.imshow(transport_plan.cpu().detach().numpy())
             wandb.log({"u_potential": u_fig, "v_potential": v_fig, "transport_plan": plan})
+    run.finish()
 
 if __name__=="__main__":
     app()
