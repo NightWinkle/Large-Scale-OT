@@ -1,23 +1,25 @@
-from typing import Union
 import os
+
+from typing import Union
+
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "10"
 
-from scipy import interpolate
-from geomloss import SamplesLoss
+import hydra
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
+
+from geomloss import SamplesLoss
+from omegaconf import DictConfig, OmegaConf
+from scipy import interpolate
 from torch.distributions import MultivariateNormal, Normal
 from torch.nn import Parameter
-from torch.optim import Adam, SGD
-import matplotlib.pyplot as plt
-
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import wandb
+from torch.optim import SGD, Adam
 
 
 def l2_distance(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -84,10 +86,14 @@ class OTPlan(nn.Module):
         u, v = self._get_uv(x, y, xidx, yidx)
 
         if self.regularization == "entropy":
-            reg = -self.alpha * torch.exp((u[:, None] + v[None, :] - K) / self.alpha)
+            reg = -self.alpha * torch.exp(
+                (u[:, None] + v[None, :] - K) / self.alpha
+            )
         else:
             reg = (
-                -torch.clamp((u[:, None] + v[None, :] - K), min=0) ** 2 / 4 / self.alpha
+                -torch.clamp((u[:, None] + v[None, :] - K), min=0) ** 2
+                / 4
+                / self.alpha
             )
         return -torch.mean(u[:, None] + v[None, :] + reg)
 
@@ -97,7 +103,9 @@ class OTPlan(nn.Module):
         if self.regularization == "entropy":
             return torch.exp((u[:, None] + v[None, :] - K) / self.alpha)
         else:
-            return torch.clamp((u[:, None] + v[None, :] - K), min=0) / (2 * self.alpha)
+            return torch.clamp((u[:, None] + v[None, :] - K), min=0) / (
+                2 * self.alpha
+            )
 
 
 class DiscretePotential(nn.Module):
@@ -196,7 +204,11 @@ def app(cfg: DictConfig) -> None:
         regularization=config["regularization"],
     ).cuda()
     sinkhorn = SamplesLoss(
-        loss="sinkhorn", p=2, blur=config["alpha"], debias=False, potentials=True
+        loss="sinkhorn",
+        p=2,
+        blur=config["alpha"],
+        debias=False,
+        potentials=True,
     )
     u_exact, v_exact = sinkhorn(
         torch.exp(mu_log).squeeze().cuda(),
@@ -276,10 +288,26 @@ def app(cfg: DictConfig) -> None:
                 - cost.numpy() / config["alpha"]
             )
 
-            plan = plt.figure()
-            plt.imshow(transport_plan)
+            transport_plan_exact = np.exp(
+                u_exact[:, None].squeeze().cpu().numpy() / config["alpha"]
+                + mu_log[:, None].squeeze().numpy()
+                + v_exact[None, :].squeeze().cpu().numpy() / config["alpha"]
+                + nu_log[None, :].squeeze().numpy()
+                - cost.numpy() / config["alpha"]
+            )
+
+            plans, (ax_plan, ax_plan_exact) = plt.subplots(1, 2)
+            ax_plan.imshow(transport_plan)
+            ax_plan.set_title("Approximate plan")
+            ax_plan_exact.imshow(transport_plan_exact)
+            ax_plan_exact.set_title("Exact plan - GeomLoss")
+
             wandb.log(
-                {"u_potential": u_fig, "v_potential": v_fig, "transport_plan": plan}
+                {
+                    "u_potential": u_fig,
+                    "v_potential": v_fig,
+                    "transport_plans": plans,
+                }
             )
     run.finish()
 
